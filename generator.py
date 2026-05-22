@@ -12,11 +12,11 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
 
 # Gemini free tier — generation + verification
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-gemini = genai.GenerativeModel("gemini-2.0-flash")
+_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+GEMINI_MODEL = "gemini-2.5-flash"
 
 CHALLENGES_DIR = Path(__file__).parent / "challenges"
 CHALLENGES_DIR.mkdir(exist_ok=True)
@@ -96,7 +96,7 @@ def generate_challenge(challenge_type: str = "math") -> dict:
 
     print(f"[gemini] generating {challenge_type} challenge...")
 
-    response = gemini.generate_content(CHALLENGE_PROMPTS[challenge_type])
+    response = _client.models.generate_content(model=GEMINI_MODEL, contents=CHALLENGE_PROMPTS[challenge_type])
     data = parse_json(response.text)
 
     if "answer" not in data or "prompt" not in data:
@@ -117,7 +117,7 @@ CLAIMED ANSWER: {challenge_data['answer']}
 Return JSON only, no markdown:
 {{"correct": true, "verified_answer": "your answer", "notes": "any issues"}}"""
 
-    response = gemini.generate_content(prompt)
+    response = _client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     result = parse_json(response.text)
     verified = result.get("correct", False)
 
@@ -147,8 +147,8 @@ def package_challenge(data: dict, challenge_type: str, epoch: int) -> dict:
         "created_at": datetime.utcnow().isoformat(),
         "expires_at": (datetime.utcnow() + timedelta(hours=24)).isoformat(),
         "status": "active",
-        "generated_by": "gemini-2.0-flash",
-        "verified_by": "claude-sonnet-4-6",
+        "generated_by": "gemini-2.5-flash",
+        "verified_by": "gemini-2.5-flash",
     }
 
 def save_challenge(packaged: dict) -> dict:
