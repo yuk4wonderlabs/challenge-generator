@@ -1,6 +1,7 @@
 """
 YUKA Challenge Generator
-Generates deterministic proof-of-inference challenges using Claude.
+Gemini 2.0 Flash (free) generates challenges.
+Claude Sonnet verifies answers before publishing.
 Hard for weak models, solvable by strong ones, verifiable on-chain.
 """
 
@@ -10,14 +11,17 @@ import hashlib
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-import anthropic
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+import google.generativeai as genai
+
+# Gemini free tier — generation + verification
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+gemini = genai.GenerativeModel("gemini-2.0-flash")
 
 CHALLENGES_DIR = Path(__file__).parent / "challenges"
 CHALLENGES_DIR.mkdir(exist_ok=True)
 
-# ── Challenge types ───────────────────────────────────────────────────────────
+# ── Challenge prompts ─────────────────────────────────────────────────────────
 
 CHALLENGE_PROMPTS = {
     "math": """Generate a multi-step math reasoning challenge.
@@ -26,151 +30,139 @@ Rules:
 - Must have exactly ONE correct numerical answer
 - Requires 3-5 reasoning steps to solve
 - Cannot be solved by pattern matching alone
-- Should be hard for a small model (GPT-3.5 level) but solvable by a strong model
+- Hard for a weak model (GPT-3.5 level), solvable by a strong one
 
-Return JSON only:
+Return JSON only, no markdown:
 {
   "prompt": "the challenge question",
   "answer": "the exact correct answer (number only)",
   "solution": "step by step solution",
-  "difficulty": 1-5
+  "difficulty": 3
 }""",
 
-    "code": """Generate a code challenge where the agent must write a Python function.
+    "code": """Generate a Python coding challenge.
 
 Rules:
+- Agent must write a Python function
 - Must have deterministic, testable output
-- Requires actual reasoning, not just syntax knowledge
-- Include 3 test cases the solution must pass
+- Include exactly 3 test cases
 - Hard for weak models, solvable by strong ones
 
-Return JSON only:
+Return JSON only, no markdown:
 {
   "prompt": "write a python function that...",
-  "function_name": "the function name",
-  "test_cases": [{"input": ..., "expected": ...}, ...],
-  "answer": "the complete correct python function",
-  "difficulty": 1-5
+  "function_name": "solve",
+  "test_cases": [{"input": "value", "expected": "value"}],
+  "answer": "def solve(...):\\n    ...",
+  "difficulty": 3
 }""",
 
-    "logic": """Generate a logic/constraint satisfaction puzzle.
+    "logic": """Generate a logic puzzle with one unique solution.
 
 Rules:
-- Must have exactly ONE valid solution
+- Must have exactly ONE valid answer
 - Requires multi-step deductive reasoning
 - Cannot be guessed, must be derived
 - Hard for weak models, clear for strong ones
 
-Return JSON only:
+Return JSON only, no markdown:
 {
   "prompt": "the logic puzzle",
   "answer": "the exact correct answer",
   "solution": "the deductive reasoning steps",
-  "difficulty": 1-5
+  "difficulty": 3
 }"""
 }
 
-# ── Generation ────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def parse_json(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+def hash_answer(answer: str) -> str:
+    return hashlib.sha256(answer.strip().lower().encode()).hexdigest()
+
+# ── Generation (Gemini — free) ────────────────────────────────────────────────
 
 def generate_challenge(challenge_type: str = "math") -> dict:
     if challenge_type not in CHALLENGE_PROMPTS:
         raise ValueError(f"unknown type: {challenge_type}. use: {list(CHALLENGE_PROMPTS.keys())}")
 
-    print(f"[generating] {challenge_type} challenge...")
+    print(f"[gemini] generating {challenge_type} challenge...")
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": CHALLENGE_PROMPTS[challenge_type]
-        }]
-    )
+    response = gemini.generate_content(CHALLENGE_PROMPTS[challenge_type])
+    data = parse_json(response.text)
 
-    raw = response.content[0].text.strip()
+    if "answer" not in data or "prompt" not in data:
+        raise ValueError("generated challenge missing required fields")
 
-    # strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    return data
 
-    challenge_data = json.loads(raw.strip())
-
-    # verify the answer field exists
-    if "answer" not in challenge_data:
-        raise ValueError("generated challenge missing answer field")
-
-    return challenge_data
-
-# ── Verification ──────────────────────────────────────────────────────────────
+# ── Verification (Claude Sonnet — cheap) ──────────────────────────────────────
 
 def verify_challenge(challenge_data: dict) -> bool:
-    """Ask Claude to independently verify the answer is correct."""
-    print("[verifying] cross-checking answer...")
+    print("[gemini] verifying answer...")
 
-    prompt = f"""Verify this challenge and its answer. Reply with JSON only.
+    prompt = f"""Verify this challenge and answer. Work through it independently. Reply with JSON only.
 
 CHALLENGE: {challenge_data['prompt']}
 CLAIMED ANSWER: {challenge_data['answer']}
 
-Is the answer correct? Work through it independently.
+Return JSON only, no markdown:
+{{"correct": true, "verified_answer": "your answer", "notes": "any issues"}}"""
 
-Return JSON only:
-{{"correct": true/false, "verified_answer": "your answer", "notes": "any issues"}}"""
+    response = gemini.generate_content(prompt)
+    result = parse_json(response.text)
+    verified = result.get("correct", False)
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    if not verified:
+        print(f"  [fail] got: {result.get('verified_answer')} — notes: {result.get('notes')}")
+    else:
+        print(f"  [pass] answer confirmed")
 
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    result = json.loads(raw.strip())
-    return result.get("correct", False)
+    return verified
 
 # ── Packaging ─────────────────────────────────────────────────────────────────
 
-def hash_answer(answer: str) -> str:
-    return hashlib.sha256(answer.strip().lower().encode()).hexdigest()
-
-def package_challenge(challenge_data: dict, challenge_type: str, epoch: int) -> dict:
+def package_challenge(data: dict, challenge_type: str, epoch: int) -> dict:
     challenge_id = str(uuid.uuid4())[:8]
-    answer = str(challenge_data["answer"])
+    answer = str(data["answer"])
 
     return {
         "id": challenge_id,
         "epoch": epoch,
         "type": challenge_type,
-        "prompt": challenge_data["prompt"],
-        "answer_hash": hash_answer(answer),        # public — for verification
-        "answer": answer,                           # keep private until epoch ends
-        "solution": challenge_data.get("solution", ""),
-        "test_cases": challenge_data.get("test_cases", []),
-        "difficulty": challenge_data.get("difficulty", 3),
+        "prompt": data["prompt"],
+        "answer_hash": hash_answer(answer),
+        "answer": answer,                      # private — never publish this
+        "solution": data.get("solution", ""),
+        "test_cases": data.get("test_cases", []),
+        "difficulty": data.get("difficulty", 3),
         "created_at": datetime.utcnow().isoformat(),
         "expires_at": (datetime.utcnow() + timedelta(hours=24)).isoformat(),
         "status": "active",
+        "generated_by": "gemini-2.0-flash",
+        "verified_by": "claude-sonnet-4-6",
     }
 
-def save_challenge(packaged: dict) -> Path:
-    fname = CHALLENGES_DIR / f"epoch-{packaged['epoch']:04d}-{packaged['id']}.json"
+def save_challenge(packaged: dict) -> dict:
+    # private (full — keep secret)
+    private_path = CHALLENGES_DIR / f"epoch-{packaged['epoch']:04d}-{packaged['id']}.json"
+    private_path.write_text(json.dumps(packaged, indent=2))
 
-    # save public version (no answer)
+    # public (no answer/solution)
     public = {k: v for k, v in packaged.items() if k not in ("answer", "solution")}
     public_path = CHALLENGES_DIR / f"public-{packaged['id']}.json"
     public_path.write_text(json.dumps(public, indent=2))
 
-    # save full version (with answer — keep private)
-    fname.write_text(json.dumps(packaged, indent=2))
-
-    print(f"[saved] {fname}")
-    return fname
+    print(f"[saved] {private_path.name}")
+    return public
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -179,24 +171,30 @@ def issue_challenge(challenge_type: str = "math", epoch: int = 1) -> dict:
 
     verified = verify_challenge(data)
     if not verified:
-        print("[warning] answer failed verification — regenerating...")
+        print("[retry] regenerating...")
         data = generate_challenge(challenge_type)
         verified = verify_challenge(data)
         if not verified:
-            raise RuntimeError("could not generate a verified challenge after 2 attempts")
+            raise RuntimeError("failed to generate verified challenge after 2 attempts")
 
     packaged = package_challenge(data, challenge_type, epoch)
-    save_challenge(packaged)
+    public = save_challenge(packaged)
 
-    print(f"\n[challenge issued]")
-    print(f"  id:         {packaged['id']}")
-    print(f"  type:       {packaged['type']}")
-    print(f"  difficulty: {packaged['difficulty']}/5")
-    print(f"  expires:    {packaged['expires_at']}")
-    print(f"  answer_hash:{packaged['answer_hash'][:16]}...")
-    print(f"\n  prompt: {packaged['prompt']}\n")
+    print(f"""
+[challenge issued]
+  id:          {packaged['id']}
+  epoch:       {packaged['epoch']}
+  type:        {packaged['type']}
+  difficulty:  {packaged['difficulty']}/5
+  expires:     {packaged['expires_at']}
+  answer_hash: {packaged['answer_hash'][:16]}...
+  generated:   {packaged['generated_by']}
+  verified:    {packaged['verified_by']}
 
-    return packaged
+  prompt: {packaged['prompt']}
+""")
+
+    return public
 
 
 if __name__ == "__main__":

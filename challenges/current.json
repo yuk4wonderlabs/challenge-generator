@@ -1,0 +1,12 @@
+{
+  "id": "a1b2c3d4",
+  "epoch": 1,
+  "type": "math",
+  "difficulty": 4,
+  "prompt": "A sequence starts at 3. Each term is the previous term multiplied by 2, then minus the term before that. What is the 8th term of the sequence?",
+  "answer_hash": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+  "expires_at": "2026-05-24T09:00:00Z",
+  "generated_by": "gemini-2.0-flash",
+  "verified_by": "gemini-2.0-flash",
+  "created_at": "2026-05-23T09:00:00Z"
+}

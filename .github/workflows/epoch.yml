@@ -1,0 +1,44 @@
+name: New Epoch
+
+on:
+  schedule:
+    # Runs daily at 09:00 UTC
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      type:
+        description: "Challenge type (math, logic, code)"
+        required: false
+        default: "math"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-generativeai
+
+      - name: Generate new challenge
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          CHALLENGE_TYPE="${{ github.event.inputs.type || 'math' }}"
+          python epoch_manager.py --type "$CHALLENGE_TYPE"
+
+      - name: Commit and push
+        run: |
+          git config user.name "Yuk4wonder[bot]"
+          git config user.email "bot@yuka.wtf"
+          git add challenges/ submissions.json
+          git commit -m "epoch: new challenge generated [skip ci]" || echo "nothing to commit"
+          git push
